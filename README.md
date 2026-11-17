@@ -13,7 +13,7 @@ Browser JavaScript handles review; Python's standard library serves local files 
 
 ## Run
 
-Use Python 3.10+ and FFmpeg:
+Use Python 3.9+ and FFmpeg:
 
 ```sh
 python3 app.py
