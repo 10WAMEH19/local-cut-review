@@ -1,5 +1,6 @@
 import math
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 import media
@@ -38,6 +39,16 @@ class ActualExport(unittest.TestCase):
             result = media.export_video(source, edited, [{'start': 2, 'end': 4}], info)
             self.assertAlmostEqual(result['duration'], info['duration'] - 2, delta=.1)
             self.assertTrue(result['audio'])
+            # Verify retained content follows the source-time mapping, not just a duration.
+            def frame(path, seconds):
+                return subprocess.run([media.ffmpeg_path(),'-loglevel','error','-i',str(path),
+                    '-ss',str(seconds),'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','-'],
+                    check=True,capture_output=True).stdout
+            for original_time, edited_time in [(1, 1), (4.5, 2.5), (5.5, 3.5)]:
+                a, b = frame(source, original_time), frame(edited, edited_time)
+                self.assertTrue(a)
+                self.assertEqual(len(a),len(b))
+                self.assertLess(sum(abs(x-y) for x,y in zip(a,b))/len(a),3)
             self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before)
 
 
