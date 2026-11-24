@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -25,12 +26,22 @@ def probe(path, ffmpeg=None):
     p = subprocess.run([ffmpeg, '-hide_banner', '-i', str(path)], capture_output=True, timeout=15)
     text = p.stderr.decode('utf-8', 'replace')
     match = re.search(r'Duration: (\d+):(\d+):([\d.]+)', text)
-    if not match or not re.search(r'Stream.*Video:', text):
+    video = next((line for line in text.splitlines() if 'Stream #' in line and 'Video:' in line and 'attached pic' not in line), '')
+    if not match or not video:
         raise ValueError('This file could not be read as a finite video. Try an MP4, MOV or WebM file.')
     duration = int(match[1]) * 3600 + int(match[2]) * 60 + float(match[3])
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError('The video duration could not be read.')
-    return {'duration': duration, 'audio': bool(re.search(r'Stream.*Audio:', text))}
+    dimensions = re.search(r'\b(\d{2,5})x(\d{2,5})\b', video)
+    rotation = re.search(r'rotation of (-?[\d.]+) degrees', text)
+    width, height = map(int, dimensions.groups()) if dimensions else (1920, 1080)
+    if rotation and round(float(rotation[1])) % 180 == 90:
+        width, height = height, width
+    rate = re.search(r'([\d.]+) fps', video)
+    return {'duration': duration, 'audio': bool(re.search(r'Stream.*Audio:', text)),
+            'width': width, 'height': height, 'fps': float(rate[1]) if rate else None,
+            'hdr': 'arib-std-b67' in video or 'smpte2084' in video,
+            'codec': video.split('Video:', 1)[1].strip().split()[0]}
 
 
 def checked_cuts(cuts, duration):
@@ -103,3 +114,84 @@ def export_video(source, destination, cuts, info, ffmpeg=None):
         if Path(destination).exists():
             Path(destination).unlink()
         raise
+
+
+def run_media(arguments, timeout=600):
+    ffmpeg = ffmpeg_path()
+    if not ffmpeg:
+        raise ValueError('FFmpeg is required to prepare this video.')
+    try:
+        result = subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin',
+                                 *arguments], capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError('This media operation timed out.') from exc
+    if result.returncode:
+        detail = result.stderr.decode(errors='replace').strip().splitlines()
+        raise ValueError('FFmpeg could not process this video. ' + (detail[-1][:240] if detail else ''))
+    return result.stdout
+
+
+def canvas_for(info, height):
+    if info['height'] > info['width']:
+        return height, round(height * 16 / 9 / 2) * 2
+    return round(height * 16 / 9 / 2) * 2, height
+
+
+def encode_segment(source, target, info, width, height, start=0, end=None, crf=22):
+    duration = (info['duration'] if end is None else end) - start
+    filters = (f'fps=30,scale={width}:{height}:force_original_aspect_ratio=decrease:'
+               'force_divisible_by=2:flags=bilinear,setsar=1')
+    if info.get('hdr'):
+        filters += (',zscale=t=linear:npl=100,format=gbrpf32le,tonemap=mobius:desat=2,'
+                    'zscale=p=bt709:t=bt709:m=bt709:r=tv')
+    filters += f',format=yuv420p,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,tpad=stop_mode=clone:stop_duration=0.15'
+    args = ['-filter_threads', '2', '-threads', '4', '-ss', f'{start:.6f}',
+            '-i', str(source)]
+    if not info['audio']:
+        args += ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
+    args += ['-map', '0:V:0', '-map', '0:a:0' if info['audio'] else '1:a:0',
+             '-vf', filters, '-af', 'aresample=48000:async=1:first_pts=0,apad',
+             '-t', f'{duration:.6f}', '-ac', '2', '-c:a', 'aac', '-b:a', '160k',
+             '-c:v', 'libx264', '-threads:v', '4', '-preset', 'veryfast', '-crf', str(crf),
+             '-g', '30', '-pix_fmt', 'yuv420p', '-colorspace', 'bt709', '-color_primaries',
+             'bt709', '-color_trc', 'bt709', '-map_metadata', '-1', '-map_chapters', '-1',
+             '-movflags', '+faststart', '-y', str(target)]
+    run_media(args)
+
+
+def make_proxy(source, target, info):
+    width, height = canvas_for(info, 540)
+    with tempfile.TemporaryDirectory(prefix='source-preview-', dir=target.parent) as folder:
+        temporary = Path(folder) / 'preview.mp4'
+        encode_segment(source, temporary, info, width, height, crf=24)
+        result = probe(temporary)
+        if abs(result['duration'] - info['duration']) > .2:
+            raise ValueError('The preview timing did not match the original.')
+        temporary.replace(target)
+
+
+def render_sequence(entries, target, height, progress):
+    width, height = canvas_for(entries[0]['info'], height)
+    expected = sum(row['end'] - row['start'] for row in entries)
+    timeline = []
+    offset = 0.0
+    with tempfile.TemporaryDirectory(prefix='sequence-', dir=target.parent) as folder:
+        folder = Path(folder)
+        for index, row in enumerate(entries):
+            progress(f'Rendering segment {index + 1} of {len(entries)}')
+            part = folder / f'{index:04}.mp4'
+            encode_segment(row['path'], part, row['info'], width, height, row['start'], row['end'])
+            duration = probe(part)['duration']
+            timeline.append({'source': row['info']['id'], 'start': row['start'], 'end': row['end'],
+                             'offset': offset, 'duration': duration})
+            offset += duration
+        listing = folder / 'segments.txt'
+        listing.write_text(''.join(f"file '{i:04}.mp4'\n" for i in range(len(entries))))
+        artifact = folder / 'complete.mp4'
+        run_media(['-f', 'concat', '-safe', '1', '-i', str(listing), '-map', '0:v:0',
+                   '-map', '0:a:0', '-c', 'copy', '-movflags', '+faststart', '-y', str(artifact)])
+        result = probe(artifact)
+        if abs(result['duration'] - expected) > max(.25, .07 * len(entries)) or not result['audio']:
+            raise ValueError('The rendered timeline did not match the expected duration.')
+        artifact.replace(target)
+    return {**result, 'timeline': timeline}

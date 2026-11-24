@@ -6,3 +6,6 @@ __pycache__/
 .DS_Store
 report/A2_Project_Report_*.md
 report/A2_Project_Report_*.pdf
+# Personal camera footage used for local testing
+/IMG_*.MOV
+/IMG_*_1080p_H264.mp4

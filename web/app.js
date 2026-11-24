@@ -1,65 +1,511 @@
-import {mergedCuts,editDuration,validBounds,changeBounds} from '/cuts.mjs';
-const $=id=>document.getElementById(id), video=$('video');
-let source=null,items=[],history=[],token='',mode='source',clipEnd=null,confirmAction=null,busy=false;
-const stamp=t=>`${Math.floor(t/60).toString().padStart(2,'0')}:${(t%60).toFixed(t%1 ? 1:0).padStart(t%1?4:2,'0')}`;
-function notice(text,error=false){$('notice').textContent=text;$('notice').classList.toggle('error',error);}
-function log(text){history.unshift({at:new Date().toISOString(),text});history=history.slice(0,40);}
-function save(){
-  if(!source)return;
-  try{localStorage.setItem('lcr:last',JSON.stringify({source,items,history,goal:$('goal').value,retain:$('retain').value,preferred:$('preferred').value}));$('save-state').textContent='Saved locally';}
-  catch{$('save-state').textContent='Not saved — download decisions JSON';notice('Browser storage is unavailable. Save decisions JSON before closing.',true);}
-}
-async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json','X-App-Token':token}:{},body:body?JSON.stringify(body):undefined});const data=await r.json();if(!r.ok)throw Error(data.error||'The local request failed.');return data;}
-function button(text,fn,classes=''){const b=document.createElement('button');b.textContent=text;b.className=classes;b.onclick=fn;return b;}
-function showConfirm(title,text,yes,action){$('confirm-title').textContent=title;$('confirm-text').textContent=text;$('confirm-note').textContent=title==='Apply this local cut?'?'The original stays available. Restore returns this interval without changing other decisions.':title==='Export this working edit?'?'The export uses this confirmed snapshot. Later edits require a new export.':'Source media files are retained. Save the decision record first if needed.';$('confirm-yes').textContent=yes;confirmAction=action;video.pause();$('confirm').showModal();}
-$('confirm').addEventListener('close',()=>{const f=confirmAction;confirmAction=null;if($('confirm').returnValue==='confirm'&&f)f();});
-function switchMode(next){mode=next;clipEnd=null;$('source-mode').classList.toggle('selected',next==='source');$('edit-mode').classList.toggle('selected',next==='edit');$('source-mode').setAttribute('aria-pressed',next==='source');$('edit-mode').setAttribute('aria-pressed',next==='edit');$('mode-note').textContent=next==='source'?'Original footage includes every interval.':'Only confirmed cuts are skipped.';$('playback-label').hidden=true;}
-async function watch(start,end,label,context=true){switchMode('source');video.currentTime=Math.max(0,start-(context?3:0));clipEnd=Math.min(source.duration,end+(context?3:0));$('playback-label').textContent=label;$('playback-label').hidden=false;try{await video.play();}catch{notice('Press Play to review this interval.');}}
-function render(){
-  if(!source)return;
-  $('source-name').textContent=source.name;$('original-duration').textContent=stamp(source.duration);$('edit-duration').textContent=stamp(editDuration(items,source.duration));$('ruler-end').textContent=stamp(source.duration);$('cut-count').textContent=items.filter(s=>s.status==='cut').length;$('pending-count').textContent=items.filter(s=>s.status==='pending').length+' pending';
-  const list=$('suggestions');list.replaceChildren();
-  if(!items.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No automatic suggestions. Add a manual local cut after watching your video.';list.append(empty);}
-  items.forEach(s=>{
-    const card=document.createElement('article');card.className='suggestion '+s.status;card.dataset.id=s.id;
-    const row=document.createElement('div');row.className='row';const time=document.createElement('span');time.className='time';time.textContent=stamp(s.start)+'–'+stamp(s.end);const status=document.createElement('span');status.className='status';status.textContent={pending:'Review needed',cut:'Cut applied',keep:'Kept by you'}[s.status];row.append(time,status);
-    const title=document.createElement('h3');title.textContent=s.title;const reason=document.createElement('p');reason.textContent=s.reason;const evidence=document.createElement('p');evidence.className='evidence';evidence.textContent=s.evidence||'Manually marked by the creator.';
-    const actions=document.createElement('div');actions.className='actions';actions.append(button('Watch with context',()=>watch(s.start,s.end,'Review '+stamp(s.start)+'–'+stamp(s.end))));
-    if(s.status==='pending'){
-      actions.append(button('Apply cut',()=>showConfirm('Apply this local cut?',`Remove ${stamp(s.start)}–${stamp(s.end)} (${(s.end-s.start).toFixed(1)} seconds) from the working edit?`,'Confirm cut',()=>{const remaining=editDuration([...items.filter(x=>x.id!==s.id),{...s,status:'cut'}],source.duration);if(remaining<.1){notice('Keep at least 0.1 seconds of footage.',true);return;}s.status='cut';log('Applied '+stamp(s.start)+'–'+stamp(s.end));switchMode('edit');render();save();notice('Cut applied. The original is unchanged; Restore returns this interval.');}),'primary'));
-      actions.append(button('Keep',()=>{s.status='keep';log('Kept '+stamp(s.start)+'–'+stamp(s.end));render();save();notice('Interval kept.');}));
-    } else if(s.status==='cut')actions.append(button('Restore',()=>{s.status='keep';log('Restored '+stamp(s.start)+'–'+stamp(s.end));render();save();notice('Interval restored. Other edit decisions are unchanged.');},'primary'));
-    else actions.append(button('Review again',()=>{s.status='pending';log('Reopened review '+stamp(s.start)+'–'+stamp(s.end));render();save();}));
-    card.append(row,title,reason,evidence,actions);
-    if(s.status!=='cut'){
-      const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Adjust cut boundaries';const bounds=document.createElement('div');bounds.className='bounds';
-      const inputs=['Start','End'].map((name,i)=>{const label=document.createElement('label');label.textContent=name+' (seconds)';const input=document.createElement('input');input.type='number';input.step='.1';input.min=0;input.max=source.duration;input.value=i?s.end:s.start;input.setAttribute('aria-label',name+' for '+s.title);label.append(input);bounds.append(label);return input;});
-      details.append(summary,bounds,button('Save boundaries',()=>{try{const changed=changeBounds(s,Number(inputs[0].value),Number(inputs[1].value),source.duration);Object.assign(s,changed);log('Adjusted '+stamp(s.start)+'–'+stamp(s.end));render();save();notice('New boundaries saved as a proposal. Review before applying.');}catch(e){notice(e.message,true);}}));card.append(details);
-    }
-    list.append(card);
-  });
-  const timeline=$('timeline');timeline.replaceChildren();items.forEach(s=>{const b=button(stamp(s.start),()=>watch(s.start,s.end,'Review '+stamp(s.start)+'–'+stamp(s.end)),s.status);b.style.left=s.start/source.duration*100+'%';b.style.width=(s.end-s.start)/source.duration*100+'%';b.setAttribute('aria-label',`${s.title}: ${stamp(s.start)} to ${stamp(s.end)}, ${s.status}`);timeline.append(b);});const head=document.createElement('i');head.className='playhead';head.id='playhead';timeline.append(head);
-  $('history').replaceChildren();history.slice(0,12).forEach(h=>{const li=document.createElement('li');li.textContent=h.text;$('history').append(li);});
-}
-async function openSource(info,old=null){video.pause();source=info;items=old?.items||[];history=old?.history||[];$('goal').value=old?.goal??'';$('retain').value=old?.retain??'';$('preferred').value=old?.preferred||'';$('export-status').textContent='';video.src=info.url;switchMode('source');render();save();notice('Video imported. Automatic content analysis is unavailable; manual local review is ready.');}
-$('source-mode').onclick=()=>switchMode('source');$('edit-mode').onclick=()=>switchMode('edit');
-$('file').onchange=async e=>{
- const file=e.target.files[0];if(!file)return;if(busy){notice('Wait for the current operation to finish.');return;}
- if(file.size>512*1024*1024){notice('Choose a file smaller than 512 MB.',true);return;}
- const proceed=async()=>{busy=true;$('file').disabled=true;video.pause();notice('Importing video on this computer…');try{const r=await fetch('/api/upload',{method:'POST',headers:{'X-App-Token':token,'X-Filename':encodeURIComponent(file.name)},body:file});const data=await r.json();if(!r.ok)throw Error(data.error);await openSource(data);}catch(err){notice(err.message,true);}finally{busy=false;$('file').disabled=false;$('file').value='';}};
- if(source&&items.length)showConfirm('Switch to another video?','A new review will replace the current browser workspace. Save decisions JSON first if you need this record. The original media is retained.','Import video',proceed);else proceed();
+import {applyPlan, overlaps, removeSource, segments, sourceRanges, validBounds} from '/project.mjs';
+
+const $ = id => document.getElementById(id);
+const video = $('video');
+const KEY = 'lcr:project-v2';
+const isSourceId = id => /^[a-f0-9]{32}$/.test(id);
+const uid = () => crypto.randomUUID();
+const blank = () => ({sources: [], order: [], cuts: [], duplicates: [], reasons: {}, goal: '',
+  preserve: '', orderSuggested: false, orderLocked: false, planGoal: '', model: '', revision: 0});
+let project = blank();
+let token = '', aiReady = false, maxUpload = 0, busy = false, view = 'source';
+let selected = null, draft = null, contextEnd = null, afterConfirm = null;
+let playerChange = 0;
+const states = new Map();
+const stamp = value => {
+  const tenths = Math.round(value * 10);
+  return `${String(Math.floor(tenths / 600)).padStart(2, '0')}:${String(Math.floor(tenths / 10) % 60).padStart(2, '0')}.${tenths % 10}`;
 };
-$('use-time').onclick=()=>{if(!source)return;$('manual-start').value=video.currentTime.toFixed(1);$('manual-end').value=Math.min(source.duration,video.currentTime+2).toFixed(1);};
-$('add-manual').onclick=()=>{if(!source)return;const a=Number($('manual-start').value),b=Number($('manual-end').value);if(!validBounds(a,b,source.duration)){notice('Choose an interval of at least 0.1 seconds inside the source.',true);return;}items.push({id:'manual-'+crypto.randomUUID(),start:a,end:b,title:'Manual local cut',reason:$('manual-reason').value.trim()||'Creator-marked interval for review.',status:'pending'});log('Marked manual proposal '+stamp(a)+'–'+stamp(b));render();save();notice('Manual proposal added. Nothing is removed until you confirm it.');};
-for(const id of ['goal','retain','preferred'])$(id).addEventListener('input',save);
-video.addEventListener('timeupdate',()=>{
-  if(source&&$('playhead'))$('playhead').style.left=video.currentTime/source.duration*100+'%';
-  if(clipEnd!==null&&video.currentTime>=clipEnd){video.pause();clipEnd=null;$('playback-label').hidden=true;}
-  if(mode==='edit'&&!video.paused){const cut=mergedCuts(items,source.duration).find(([a,b])=>video.currentTime>=a&&video.currentTime<b);if(cut){if(cut[1]>=source.duration-.01){video.pause();video.currentTime=source.duration;}else video.currentTime=cut[1];}}
+const byId = id => project.sources.find(source => source.id === id);
+const selectedSource = () => byId(selected);
+const unresolved = () => project.orderSuggested || [...project.cuts, ...project.duplicates].some(item => item.status === 'draft');
+
+function notice(value, error = false) {
+  $('notice').textContent = value;
+  $('notice').classList.toggle('error', error);
+}
+
+function save() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify({...project, selected}));
+    $('save-state').textContent = 'Saved on this Mac';
+  } catch {
+    $('save-state').textContent = 'Saving unavailable';
+  }
+}
+
+function changed() {
+  project.revision++;
+  draft = null;
+  if (view === 'draft') playSource(selected);
+  render();
+  save();
+}
+
+async function api(path, body) {
+  const response = await fetch(path, body === undefined ? {} : {
+    method: 'POST', headers: {'Content-Type': 'application/json', 'X-App-Token': token}, body: JSON.stringify(body),
+  });
+  const result = await response.json();
+  if (!response.ok) throw Error(result.error || 'The local request failed.');
+  return result;
+}
+
+async function finishJob(start, progress) {
+  if (!start.job) return start;
+  while (true) {
+    const job = await api('/api/jobs/' + start.job);
+    progress(job.message);
+    if (job.state === 'failed') throw Error(job.message);
+    if (job.state === 'ready') return job.result;
+    await new Promise(resolve => setTimeout(resolve, 700));
+  }
+}
+
+function el(tag, text, css = '') {
+  const node = document.createElement(tag);
+  node.textContent = text;
+  if (css) node.className = css;
+  return node;
+}
+
+function button(label, callback, css = '') {
+  const node = el('button', label, css);
+  node.type = 'button';
+  node.onclick = callback;
+  return node;
+}
+
+function confirm(title, message, label, action) {
+  $('confirm-title').textContent = title;
+  $('confirm-text').textContent = message;
+  $('confirm-yes').textContent = label;
+  afterConfirm = action;
+  video.pause();
+  $('confirm').returnValue = '';
+  $('confirm').showModal();
+}
+
+$('confirm').addEventListener('close', () => {
+  const action = afterConfirm;
+  afterConfirm = null;
+  if ($('confirm').returnValue === 'confirm') action?.();
 });
-video.addEventListener('play',()=>{if(source&&mode==='edit'){const cut=mergedCuts(items,source.duration).find(([a,b])=>video.currentTime>=a&&video.currentTime<b);if(cut)video.currentTime=cut[1];}});
-video.addEventListener('error',()=>notice('The browser could not play this source. Try an H.264 MP4. The original and decisions are retained.',true));
-$('save-decisions').onclick=()=>{if(!source)return;const blob=new Blob([JSON.stringify({version:1,source,brief:{goal:$('goal').value,retain:$('retain').value,preferred_duration:$('preferred').value||null},suggestions:items,history,analysis:'manual; automatic understanding unavailable'},null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='local-cut-review-decisions.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);notice('Decision record downloaded. It does not contain the video.');};
-$('export').onclick=()=>{if(!source||busy)return;const cuts=mergedCuts(items,source.duration).map(([start,end])=>({start,end}));showConfirm('Export this working edit?',`${cuts.length} confirmed cut range(s). Original: ${stamp(source.duration)}. Export: ${stamp(editDuration(items,source.duration))}. Pending and kept intervals will remain.`,'Export MP4',async()=>{busy=true;$('export').disabled=true;const sourceAtExport=source;const payload={source:source.id,source_hash:source.sha256,cuts,confirmed:true};$('export-status').textContent='Rendering the confirmed edit…';notice('Export is running on this computer. The original is unchanged.');try{const data=await api('/api/export',payload);const a=document.createElement('a');a.href=data.url;a.textContent='Download MP4 ('+stamp(data.duration)+')';$('export-status').replaceChildren(a);if(source===sourceAtExport){log('Exported '+stamp(data.duration)+'; original preserved');save();}notice('Export verified and ready to download. Any later decisions require a new export.');}catch(e){$('export-status').textContent=e.message;notice(e.message,true);}finally{busy=false;$('export').disabled=false;}});};
-async function init(){try{const setup=await api('/api/bootstrap');token=setup.token;let old;try{old=JSON.parse(localStorage.getItem('lcr:last'));}catch{}if(old?.source){const r=await fetch(old.source.url,{method:'HEAD'});if(r.ok){await openSource(old.source,old);return;}}notice('Import a video to start reviewing.');if(!setup.export_available)$('export-status').textContent='FFmpeg is required to import and export video.';}catch(e){notice(e.message,true);}}
+
+function modeUi() {
+  for (const [id, active] of [['source-mode', view === 'source'], ['draft-mode', view === 'draft']]) {
+    $(id).setAttribute('aria-pressed', String(active));
+    $(id).classList.toggle('selected', active);
+  }
+  $('source-name').textContent = view === 'draft' ? 'Rough cut' : selectedSource()?.name || 'Preview';
+  $('mode-note').textContent = view === 'draft' ? 'Combined playback' : 'Lightweight preview';
+  $('player-empty').hidden = !!video.getAttribute('src');
+  $('manual').hidden = view !== 'source' || !selectedSource()?.preview_ready;
+  const track = $('sequence-track');
+  track.replaceChildren();
+  track.hidden = view !== 'draft' || !draft?.timeline.length;
+  if (!track.hidden) draft.timeline.forEach((row, index) => {
+    const marker = button(String(index + 1), () => { video.currentTime = row.offset; });
+    marker.style.flexGrow = String(row.duration);
+    marker.setAttribute('aria-label', `${byId(row.source).name} at ${stamp(row.offset)} in the rough cut`);
+    track.append(marker);
+  });
+}
+
+function setPlayer(url, portrait, start = 0, end = null, autoplay = false) {
+  const revision = ++playerChange;
+  contextEnd = end;
+  video.dataset.portrait = String(portrait);
+  const position = () => {
+    if (revision !== playerChange) return;
+    video.currentTime = start;
+    if (autoplay) video.play().catch(() => notice('Press Play to review the selected interval.'));
+  };
+  if (!url) {
+    video.removeAttribute('src');
+    video.load();
+  } else if (video.getAttribute('src') !== url) {
+    video.src = url;
+    video.addEventListener('loadedmetadata', position, {once: true});
+  } else if (video.readyState) {
+    position();
+  } else {
+    video.addEventListener('loadedmetadata', position, {once: true});
+  }
+  modeUi();
+}
+
+function playSource(id, start = 0, end = null, autoplay = false) {
+  selected = byId(id)?.id ?? project.sources[0]?.id ?? null;
+  const source = selectedSource();
+  view = 'source';
+  video.pause();
+  const message = source ? (states.get(source.id)?.error ? 'Preview preparation failed' : 'Preparing source preview…') : 'Import a video to begin';
+  $('player-empty').textContent = message;
+  video.poster = '';
+  setPlayer(source?.preview_ready ? source.preview_url : '', source?.height > source?.width, start, end, autoplay);
+  render();
+  save();
+}
+
+function withContext(item) {
+  const source = byId(item.source);
+  playSource(item.source, Math.max(0, item.start - 2), Math.min(source.duration, item.end + 2), true);
+}
+
+function requestRemoval(source) {
+  confirm('Remove this video from the project?',
+    `${source.name} and its cuts will be removed from this timeline. The video file stays on your Mac.`,
+    'Remove from project', () => {
+      const replacePlayer = view === 'source' && selected === source.id;
+      removeSource(project, source.id);
+      states.delete(source.id);
+      if (selected === source.id) selected = project.order[0] ?? null;
+      $('export-status').replaceChildren();
+      changed();
+      if (replacePlayer) playSource(selected);
+      notice(`${source.name} removed from this project.`);
+    });
+}
+
+function move(id, destination) {
+  const from = project.order.indexOf(id);
+  if (from < 0 || destination < 0 || destination >= project.order.length || from === destination) return;
+  project.order.splice(from, 1);
+  project.order.splice(destination, 0, id);
+  project.orderLocked = true;
+  project.orderSuggested = false;
+  delete project.reasons[id];
+  changed();
+}
+
+function changeCut(item, status) {
+  const sameClip = project.cuts.filter(cut => cut.source === item.source &&
+    ((cut.status === 'cut' || cut.status === 'draft') && cut !== item || cut === item && status === 'cut'));
+  if (status === 'cut' && !sourceRanges(byId(item.source).duration, sameClip).length) {
+    notice('Keep at least 0.1 seconds of this source. Adjust a cut boundary.', true);
+    return;
+  }
+  item.status = status;
+  changed();
+  notice(status === 'keep' ? 'Interval kept. Refresh the rough-cut preview to hear and see it.' : 'Cut confirmed.');
+}
+
+function cardFor(item) {
+  const card = el('article', '', 'suggestion ' + item.status);
+  const labels = {draft: 'Proposed in rough cut', cut: 'Confirmed cut', keep: 'Kept', pending: 'Manual proposal'};
+  const source = byId(item.source);
+  const bounds = `${stamp(item.start)}–${stamp(item.end)}`;
+  card.append(el('div', `${source.name} · ${bounds}`, 'time'), el('div', labels[item.status], 'status'),
+    el('h3', item.title || (item.kind === 'repeat' ? 'Repeated content' : 'Possible unrelated content')),
+    el('p', item.reason));
+  if (item.observation) card.append(el('p', item.observation, 'evidence'));
+  const actions = el('div', '', 'actions');
+  actions.append(button('Watch with context', () => withContext(item)));
+  if (item.comparison && byId(item.comparison.source)) {
+    const comparison = item.comparison;
+    card.append(el('p', `Compare ${byId(comparison.source).name} · ${stamp(comparison.start)}–${stamp(comparison.end)}`, 'evidence'));
+    actions.append(button('Watch comparison', () => withContext(comparison)));
+  }
+  if (item.status === 'cut') actions.append(button('Restore', () => changeCut(item, 'keep'), 'primary'));
+  else if (item.status === 'keep') actions.append(button('Review again', () => changeCut(item, 'pending')));
+  else actions.append(button('Confirm cut', () => changeCut(item, 'cut'), 'primary'), button('Keep interval', () => changeCut(item, 'keep')));
+  card.append(actions);
+  if (item.status !== 'cut') {
+    const details = document.createElement('details'), fields = el('div', '', 'bounds');
+    details.append(el('summary', 'Adjust cut boundaries'));
+    const inputs = ['Start', 'End'].map((label, index) => {
+      const wrapper = el('label', label + ' (seconds)'), input = document.createElement('input');
+      input.type = 'number'; input.min = '0'; input.max = source.duration; input.step = '0.01';
+      input.value = index ? item.end : item.start;
+      wrapper.append(input); fields.append(wrapper);
+      return input;
+    });
+    details.append(fields, button('Save boundaries', () => {
+      const [start, end] = inputs.map(input => input.valueAsNumber);
+      if (!validBounds(start, end, source.duration)) return notice('Enter a valid range of at least 0.1 seconds.', true);
+      if (project.cuts.some(other => other !== item && other.status === 'keep' && overlaps({...item, start, end}, other))) {
+        return notice('This range overlaps a segment marked Keep. Review that decision first.', true);
+      }
+      Object.assign(item, {start, end, status: 'pending'});
+      changed();
+    }));
+    card.append(details);
+  }
+  return card;
+}
+
+function render() {
+  const sourceList = $('sources');
+  sourceList.replaceChildren();
+  for (const source of project.sources) {
+    const li = document.createElement('li');
+    const row = el('div', '', 'source-row');
+    const btn = button(source.name, () => playSource(source.id), 'source-item');
+    btn.setAttribute('aria-pressed', String(selected === source.id));
+    const resolution = source.width && source.height ? `${source.width} × ${source.height}` : '';
+    const status = states.get(source.id);
+    const rate = source.fps ? `${Math.round(source.fps)} fps source` : '';
+    btn.append(el('small', [stamp(source.duration), resolution, rate, source.preview_ready ? 'Preview ready' : status?.message || 'Preparing preview'].filter(Boolean).join(' · ')));
+    const remove = button('Remove', () => requestRemoval(source), 'remove-source');
+    remove.setAttribute('aria-label', `Remove ${source.name} from project`);
+    remove.disabled = busy;
+    row.append(btn, remove);
+    li.append(row);
+    if (status?.error) li.append(button('Retry preview', () => prepare(source)));
+    sourceList.append(li);
+  }
+  const sequence = $('timeline');
+  sequence.replaceChildren();
+  project.order.forEach((id, index) => {
+    const source = byId(id), row = document.createElement('li');
+    const duplicate = project.duplicates.find(item => item.source === id && ['draft', 'cut'].includes(item.status));
+    if (duplicate) row.classList.add('omitted');
+    const description = el('div', '');
+    description.append(el('strong', `${index + 1}. ${source.name}`),
+      el('small', duplicate ? 'Alternate copy omitted from the rough cut' : project.reasons[id] || 'In current order'));
+    const actions = el('div', '', 'timeline-controls');
+    const up = button('↑', () => move(id, index - 1)), down = button('↓', () => move(id, index + 1));
+    up.disabled = index === 0 || busy; down.disabled = index === project.order.length - 1 || busy;
+    up.setAttribute('aria-label', 'Move ' + source.name + ' earlier');
+    down.setAttribute('aria-label', 'Move ' + source.name + ' later');
+    actions.append(up, down);
+    row.append(description, actions);
+    row.draggable = !busy;
+    row.ondragstart = event => event.dataTransfer.setData('text/plain', id);
+    row.ondragover = event => { if (!busy) event.preventDefault(); };
+    row.ondrop = event => { event.preventDefault(); if (!busy) move(event.dataTransfer.getData('text/plain'), index); };
+    sequence.append(row);
+  });
+  const review = $('suggestions');
+  review.replaceChildren();
+  for (const item of project.duplicates) {
+    const card = el('article', '', 'suggestion ' + item.status);
+    card.append(el('div', byId(item.source).name, 'time'), el('h3', 'Alternate copy'),
+      el('p', `${item.reason} The rough cut uses ${byId(item.match).name}.`));
+    const actions = el('div', '', 'actions');
+    actions.append(button('Preview copy', () => playSource(item.source)));
+    if (item.status === 'keep') actions.append(button('Omit copy', () => { item.status = 'draft'; changed(); }));
+    else actions.append(button('Include copy', () => { item.status = 'keep'; changed(); }));
+    card.append(actions); review.append(card);
+  }
+  for (const item of project.cuts) review.append(cardFor(item));
+  if (!project.cuts.length && !project.duplicates.length) {
+    review.append(el('div', project.model ? 'No cuts proposed for this footage.' : 'Editing suggestions will appear here.', 'empty'));
+  }
+  const list = segments(project);
+  const n = [...project.cuts, ...project.duplicates].filter(item => ['draft', 'pending'].includes(item.status)).length;
+  $('pending-count').textContent = n + ' to review';
+  $('approve').hidden = !unresolved();
+  $('approve').disabled = busy;
+  $('plan-goal').textContent = project.planGoal ? `Editing goal: ${project.planGoal}` : '';
+  $('edit-duration').textContent = list.length ? 'Rough cut · ' + stamp(list.reduce((sum, row) => sum + row.end - row.start, 0)) : '';
+  $('analysis-status').textContent = project.model ? `Analyzed on this Mac · ${project.model}` : aiReady ? 'Local picture and speech analysis' : 'Local AI models are not ready. Refresh after setup.';
+  $('suggest').disabled = busy || !project.sources.length || !aiReady || project.sources.some(source => !source.preview_ready);
+  $('draft-mode').disabled = busy || !list.length || project.sources.some(source => !source.preview_ready);
+  $('draft-mode').textContent = draft?.revision === project.revision ? 'Rough cut' : 'Build rough-cut preview';
+  $('source-mode').disabled = !selected;
+  $('export').disabled = busy || !list.length;
+  $('import').disabled = $('new-project').disabled = busy;
+  $('save-decisions').disabled = !project.sources.length;
+  modeUi();
+}
+
+async function prepare(source) {
+  if (source.preview_ready) return;
+  states.set(source.id, {message: 'Queued for preview'});
+  render();
+  try {
+    const result = await finishJob(await api('/api/prepare', {source: source.id}), message => {
+      const normalized = message.startsWith('Waiting') ? 'Queued for preview' : 'Preparing preview';
+      if (states.get(source.id)?.message !== normalized && byId(source.id) === source) {
+        states.set(source.id, {message: normalized});
+        render();
+      }
+    });
+    if (byId(source.id) !== source) return;
+    Object.assign(source, result.source);
+    states.delete(source.id);
+    if (selected === source.id && view === 'source' && !video.getAttribute('src')) playSource(source.id);
+  } catch (error) {
+    if (byId(source.id) !== source) return;
+    states.set(source.id, {message: 'Preview failed', error: true});
+    notice(error.message, true);
+  } finally { render(); save(); }
+}
+
+async function buildPreview() {
+  if (busy) return;
+  if (draft?.revision === project.revision) {
+    view = 'draft';
+    video.pause(); video.poster = '';
+    setPlayer(draft.url, draft.height > draft.width);
+    return;
+  }
+  const revision = project.revision;
+  busy = true;
+  render();
+  notice('Building continuous rough-cut playback…');
+  try {
+    const result = await finishJob(await api('/api/sequence-preview', {segments: segments(project)}), notice);
+    if (revision !== project.revision) return;
+    draft = {...result, revision};
+    view = 'draft';
+    video.pause(); video.poster = '';
+    setPlayer(result.url, result.height > result.width);
+    notice(unresolved() ? 'Rough cut ready. Review the order and cuts before confirming.' : 'Rough-cut preview ready.');
+  } catch (error) { notice(error.message, true); }
+  finally { busy = false; render(); }
+}
+
+async function analyze() {
+  if (busy) return;
+  busy = true;
+  render();
+  notice('Starting local picture and speech analysis…');
+  let success = false;
+  try {
+    const input = {sources: project.sources.map(({id}) => id), goal: project.goal.trim(), preserve: project.preserve.trim()};
+    const result = await finishJob(await api('/api/analyze', input), notice);
+    applyPlan(project, result, uid);
+    changed();
+    success = true;
+  } catch (error) { notice(error.message, true); }
+  finally { busy = false; render(); }
+  if (success) await buildPreview();
+}
+
+async function importFiles(files) {
+  if (busy || !files.length) return;
+  if (project.sources.length + files.length > 20) return notice('Use up to 20 source files in a project.', true);
+  busy = true;
+  render();
+  const imported = [], pending = [], errors = [];
+  for (const [index, file] of files.entries()) {
+    notice(`Importing ${index + 1} of ${files.length} · ${file.name}`);
+    if (!file.size || file.size > maxUpload) { errors.push(`${file.name}: choose a video no larger than 2 GB.`); continue; }
+    try {
+      const response = await fetch('/api/upload', {method: 'POST', body: file,
+        headers: {'X-App-Token': token, 'X-Filename': encodeURIComponent(file.name)}});
+      const result = await response.json();
+      if (!response.ok) throw Error(result.error);
+      project.sources.push(result); project.order.push(result.id);
+      imported.push(result);
+      if (!selected) playSource(result.id);
+      else changed();
+      pending.push(prepare(result));
+    } catch (error) { errors.push(`${file.name}: ${error.message}`); }
+  }
+  busy = false;
+  render();
+  save();
+  await Promise.all(pending);
+  const ready = imported.filter(item => item.preview_ready).length;
+  if (ready) notice(`${ready} of ${files.length} new videos ready.${errors.length ? ' ' + errors.join(' ') : ''}`, !!errors.length);
+  else if (errors.length) notice(errors.join(' '), true);
+}
+
+function reset(refresh = true) {
+  project = blank();
+  draft = null; selected = null; states.clear();
+  $('goal').value = ''; $('retain').value = ''; $('export-status').replaceChildren();
+  if (refresh) playSource(null);
+}
+
+function switchProject(title, label, action) {
+  if (!project.sources.length) { action(); return; }
+  confirm(title, 'This replaces the current open timeline. Save its decisions first if you want a record. Your source and export files stay on this Mac.', label, action);
+}
+
+$('new-project').onclick = () => switchProject('Start a new project?', 'New project', () => { reset(); notice('Import the videos for your new project.'); });
+$('import').onclick = () => $('file').click();
+$('file').onchange = event => {
+  const files = [...event.target.files];
+  event.target.value = '';
+  importFiles(files);
+};
+$('source-mode').onclick = () => playSource(selected);
+$('draft-mode').onclick = buildPreview;
+$('suggest').onclick = analyze;
+for (const [element, key] of [['goal', 'goal'], ['retain', 'preserve']]) $(element).oninput = () => { project[key] = $(element).value; save(); };
+$('use-time').onclick = () => {
+  const source = selectedSource();
+  if (!source) return;
+  $('manual-start').value = Math.max(0, Math.min(video.currentTime, source.duration - .1)).toFixed(2);
+  $('manual-end').value = Math.min(source.duration, video.currentTime + 2).toFixed(2);
+};
+$('add-manual').onclick = () => {
+  const source = selectedSource(), start = $('manual-start').valueAsNumber, end = $('manual-end').valueAsNumber;
+  if (!source || !validBounds(start, end, source.duration)) return notice('Enter a valid range of at least 0.1 seconds.', true);
+  project.cuts.push({id: uid(), source: source.id, start, end, title: 'Manual local cut',
+    reason: 'Interval marked by you.', status: 'pending', origin: 'manual'});
+  changed(); notice('Manual proposal added for review.');
+};
+$('approve').onclick = () => {
+  confirm('Confirm the rough cut?', 'Confirm the current order, proposed cuts and omitted alternate copies. You can still edit or restore them.', 'Confirm rough cut', () => {
+    for (const item of [...project.cuts, ...project.duplicates]) if (item.status === 'draft') item.status = 'cut';
+    project.orderSuggested = false;
+    project.orderLocked = true;
+    render(); save(); notice('Rough cut confirmed. You can now export it.');
+  });
+};
+$('export').onclick = () => {
+  if (busy) return;
+  if (unresolved()) return notice('Confirm the rough cut or review the proposed edits first.', true);
+  const rows = segments(project, false), height = Number($('quality').value);
+  if (!rows.length) return;
+  confirm('Export MP4?', `Render ${rows.length} segments from the source files at ${height === 2160 ? '4K' : height + 'p'}, 30 fps.`, 'Export MP4', async () => {
+    busy = true; render(); $('export-status').textContent = 'Rendering from the original video files…';
+    try {
+      const result = await finishJob(await api('/api/sequence-export', {confirmed: true, segments: rows, height}),
+        value => $('export-status').textContent = value);
+      const link = el('a', 'Download MP4 · ' + stamp(result.duration)); link.href = result.url;
+      $('export-status').replaceChildren(link);
+      notice('MP4 export ready.');
+    } catch (error) { $('export-status').textContent = error.message; notice(error.message, true); }
+    finally { busy = false; render(); }
+  });
+};
+$('save-decisions').onclick = () => {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(project, null, 2)], {type: 'application/json'}));
+  const link = document.createElement('a'); link.href = url; link.download = 'local-cut-review-project.json'; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+video.addEventListener('timeupdate', () => {
+  if (contextEnd !== null && video.currentTime >= contextEnd) { video.pause(); contextEnd = null; }
+});
+video.addEventListener('error', () => {
+  if (video.getAttribute('src')) notice('The browser could not play this preview. Retry the preview or switch sources.', true);
+});
+
+async function init() {
+  try {
+    const setup = await api('/api/bootstrap');
+    token = setup.token; maxUpload = setup.max_upload; aiReady = setup.ai_ready;
+    let cached;
+    try { cached = JSON.parse(localStorage.getItem(KEY)); } catch {}
+    if (!cached) {
+      let old;
+      try { old = JSON.parse(localStorage.getItem('lcr:last')); } catch {}
+      if (isSourceId(old?.source?.id)) cached = {...blank(), sources: [old.source], order: [old.source.id],
+        cuts: (old.items || []).map(item => ({...item, source: old.source.id, origin: 'manual'})),
+        goal: old.goal || '', preserve: old.retain || '', selected: old.source.id};
+    }
+    if (cached) {
+      const recovered = await Promise.allSettled(cached.sources.filter(source => isSourceId(source.id)).map(source => api('/api/source/' + source.id)));
+      const sources = recovered.filter(item => item.status === 'fulfilled').map(item => item.value);
+      const ids = new Set(sources.map(({id}) => id));
+      project = {...blank(), ...cached, sources, order: cached.order.filter(id => ids.has(id)),
+        cuts: cached.cuts.filter(item => ids.has(item.source)),
+        duplicates: cached.duplicates.filter(item => ids.has(item.source) && ids.has(item.match))};
+      selected = ids.has(cached.selected) ? cached.selected : sources[0]?.id || null;
+      $('goal').value = project.goal; $('retain').value = project.preserve;
+      playSource(selected);
+      sources.forEach(prepare);
+    }
+    render();
+    notice(project.sources.length ? 'Local project opened.' : 'Import your videos together to start a rough cut.');
+  } catch (error) { notice(error.message, true); }
+}
+
 init();

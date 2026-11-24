@@ -70,6 +70,38 @@ class LocalServer(unittest.TestCase):
         self.assertEqual(self.request('/api/export',{})[0],403)
         self.assertEqual(self.request('/media/../../README.md')[0],404)
         self.assertEqual(self.request('/local_config.json')[0],404)
+        self.assertEqual(self.request('/api/bootstrap', headers={'Host': 'another.example'})[0],403)
+
+    @unittest.skipUnless(media.ffmpeg_path(),'Requires configured FFmpeg')
+    def test_ordered_preview_and_export_use_validated_source_ranges(self):
+        headers = {'X-App-Token': app.TOKEN}
+        sources = []
+        for pattern in ('testsrc2', 'smptebars'):
+            path = make_test_video(app.DATA / (pattern + '.mp4'), pattern)
+            status, _, uploaded = self.request('/api/upload', path.read_bytes(), {**headers, 'X-Filename': path.name})
+            self.assertEqual(status, 200)
+            source = json.loads(uploaded)
+            status, _, preparation = self.request('/api/prepare', {'source': source['id']}, headers)
+            self.assertEqual(status, 202)
+            preview_source = self.finished(preparation)['source']
+            status, _, content = self.request(preview_source['preview_url'], headers={'Range': 'bytes=0-63'})
+            self.assertEqual((status, len(content)), (206, 64))
+            sources.append(source)
+        segments = [{'source': source['id'], 'sha256': source['sha256'], 'start': start, 'end': end}
+                    for source, (start, end) in zip(reversed(sources), [(0.5, 2), (3, 5)])]
+        status, _, self_serve = self.request('/api/sequence-preview', {'segments': segments}, headers)
+        self.assertEqual(status, 202)
+        draft = self.finished(self_serve)
+        self.assertEqual([x['source'] for x in draft['timeline']], [source['id'] for source in reversed(sources)])
+        self.assertAlmostEqual(draft['duration'], 3.5, delta=.12)
+        self.assertEqual(self.request(draft['url'], headers={'Range': 'bytes=0-31'})[0], 206)
+        self.assertEqual(self.request('/api/sequence-export', {'segments': segments}, headers)[0], 400)
+        status, _, export = self.request('/api/sequence-export', {'segments': segments, 'confirmed': True, 'height': 720}, headers)
+        self.assertEqual(status, 202)
+        result = self.finished(export)
+        self.assertEqual(result['height'], 720)
+        self.assertAlmostEqual(result['duration'], 3.5, delta=.12)
+        self.assertEqual(self.request(result['url'])[0], 200)
 
     @unittest.skipUnless(media.ffmpeg_path(),'Requires configured FFmpeg')
     def test_real_upload_manual_cut_export_and_original_preservation(self):

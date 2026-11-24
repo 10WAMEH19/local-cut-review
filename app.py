@@ -7,17 +7,19 @@ import re
 import secrets
 import threading
 import uuid
+import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import media
+import project_jobs
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data'
 TOKEN = secrets.token_urlsafe(32)
 EXPORT_LOCK = threading.Lock()
-MAX_UPLOAD = 512 * 1024 * 1024
+MAX_UPLOAD = 2 * 1024 * 1024 * 1024
 
 
 def media_record(identifier):
@@ -29,8 +31,80 @@ def media_record(identifier):
     return DATA / (identifier + '.mp4'), json.loads(path.read_text())
 
 
+def source_record(identifier):
+    source, info = media_record(identifier)
+    if not source.is_file():
+        raise ValueError('The original file is unavailable.')
+    if 'width' not in info:
+        info = {**info, **media.probe(source)}
+    preview = DATA / (identifier + '.preview.mp4')
+    return source, {**info, 'preview_ready': preview.is_file(),
+                    'preview_url': '/previews/' + identifier + '.mp4'}
+
+
+def prepare_source(identifier):
+    source, info = source_record(identifier)
+    if info['preview_ready']:
+        return {'source': info}
+
+    def prepare(progress):
+        progress('Preparing a browser preview for ' + info['name'])
+        media.make_proxy(source, DATA / (identifier + '.preview.mp4'), info)
+        return {'source': {**info, 'preview_ready': True}}
+
+    return project_jobs.submit('Waiting to prepare ' + info['name'], prepare, key='proxy:' + identifier)
+
+
+def edit_entries(value, preview):
+    if not preview and value.get('confirmed') is not True:
+        raise ValueError('Confirm the draft before exporting.')
+    height = 540 if preview else value.get('height', 1080)
+    if height not in (540, 720, 1080, 2160) or (not preview and height == 540):
+        raise ValueError('Choose a supported export resolution.')
+    rows = value.get('segments')
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 160:
+        raise ValueError('A timeline needs between 1 and 160 video segments.')
+    records, result = {}, []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('source'), str):
+            raise ValueError('A timeline segment has no source.')
+        identifier = row['source']
+        if identifier not in records:
+            records[identifier] = source_record(identifier)
+        path, info = records[identifier]
+        if row.get('sha256') != info['sha256']:
+            raise ValueError('A source reference is out of date.')
+        a, b = row.get('start'), row.get('end')
+        if (any(type(t) not in (int, float) or abs(t) > info['duration'] or not math.isfinite(t) for t in (a, b))
+                or not 0 <= a < b <= info['duration'] or b - a < .099):
+            raise ValueError('A timeline segment has invalid boundaries.')
+        if preview:
+            if not info['preview_ready']:
+                raise ValueError('Wait for source previews to finish.')
+            path = DATA / (identifier + '.preview.mp4')
+            info = {**info, 'hdr': False, 'audio': True}
+        result.append({'path': path, 'info': info, 'start': a, 'end': b})
+    return result, height
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
+
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        host = self.headers.get('Host', '').split(':', 1)[0].lower()
+        if host not in ('127.0.0.1', 'localhost'):
+            self.send_json({'error': 'Open this editor using its localhost address.'}, 403)
+            self.close_connection = True
+            return False
+        return True
 
     def send_json(self, value, code=200):
         data = json.dumps(value).encode()
@@ -96,12 +170,26 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             if path == '/api/bootstrap':
-                self.send_json({'token': TOKEN, 'export_available': bool(media.ffmpeg_path())})
+                import local_analysis
+                self.send_json({'token': TOKEN, 'export_available': bool(media.ffmpeg_path()),
+                                'max_upload': MAX_UPLOAD, 'ai_ready': local_analysis.configured()})
+            elif path.startswith('/api/source/'):
+                self.send_json(source_record(path.rsplit('/', 1)[1])[1])
+            elif path.startswith('/api/jobs/'):
+                job = project_jobs.status(path.rsplit('/', 1)[1])
+                self.send_json(job or {'error': 'This job is no longer available.'}, 200 if job else 404)
+            elif re.fullmatch(r'/(previews|drafts)/[a-f0-9]{32}\.mp4', path):
+                name = path.rsplit('/', 1)[1]
+                if path.startswith('/previews/'):
+                    name = name.replace('.mp4', '.preview.mp4')
+                else:
+                    name = name.replace('.mp4', '.draft.mp4')
+                self.serve_file(DATA / name, 'video/mp4')
             elif path.startswith('/media/'):
                 self.serve_file(media_record(path[7:])[0], 'video/mp4')
             elif re.fullmatch(r'/exports/[a-f0-9]{32}\.mp4', path):
                 self.serve_file(DATA / path.split('/')[-1], 'video/mp4', True)
-            elif path in ['/', '/app.js', '/style.css', '/cuts.mjs']:
+            elif path in ['/', '/app.js', '/style.css', '/project.mjs']:
                 name = 'index.html' if path == '/' else path[1:]
                 self.serve_file(ROOT / 'web' / name, 'text/javascript' if name.endswith(('.js', '.mjs')) else None)
             else:
@@ -120,7 +208,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get('Content-Length', '0'))
             if path == '/api/upload':
                 if not 0 < length <= MAX_UPLOAD:
-                    raise ValueError('Choose a video smaller than 512 MB for this local prototype.')
+                    raise ValueError('Choose a video no larger than 2 GB.')
                 identifier = uuid.uuid4().hex
                 file = DATA / (identifier + '.mp4')
                 remaining, digest = length, hashlib.sha256()
@@ -134,10 +222,44 @@ class Handler(BaseHTTPRequestHandler):
                     info.update(id=identifier, name=unquote(self.headers.get('X-Filename', 'Imported video'))[:160],
                                 sha256=digest.hexdigest(), url='/media/' + identifier)
                     (DATA / (identifier + '.json')).write_text(json.dumps(info))
-                    self.send_json(info)
                 except Exception:
                     file.unlink(missing_ok=True)
                     raise
+                self.send_json(source_record(identifier)[1])
+            elif path in ('/api/prepare', '/api/analyze', '/api/sequence-preview', '/api/sequence-export'):
+                if not 0 < length <= 100000:
+                    raise ValueError('The request is too large or empty.')
+                value = json.loads(self.rfile.read(length))
+                if not isinstance(value, dict):
+                    raise ValueError('Use a project request object.')
+                if path == '/api/prepare':
+                    result = prepare_source(str(value.get('source', '')))
+                elif path == '/api/analyze':
+                    import local_analysis
+                    identifiers = value.get('sources')
+                    if (not isinstance(identifiers, list) or not 1 <= len(identifiers) <= 20
+                            or any(not isinstance(item, str) for item in identifiers)
+                            or len(set(identifiers)) != len(identifiers)):
+                        raise ValueError('Select between 1 and 20 distinct sources for analysis.')
+                    records = [source_record(item) for item in identifiers]
+                    if any(not info['preview_ready'] for _, info in records):
+                        raise ValueError('Wait for the source previews to finish before analyzing.')
+                    goal = str(value.get('goal', ''))[:1200]
+                    preserve = str(value.get('preserve', ''))[:1200]
+                    result = project_jobs.submit('AI analysis queued', lambda progress: local_analysis.analyze(
+                        records, DATA, goal, preserve, progress), analysis=True)
+                else:
+                    preview = path == '/api/sequence-preview'
+                    entries, height = edit_entries(value, preview)
+                    identifier = uuid.uuid4().hex
+                    output = DATA / (identifier + ('.draft.mp4' if preview else '.mp4'))
+
+                    def render(progress):
+                        render_info = media.render_sequence(entries, output, height, progress)
+                        return {**render_info, 'url': ('/drafts/' if preview else '/exports/') + identifier + '.mp4'}
+
+                    result = project_jobs.submit('Sequence queued', render)
+                self.send_json(result, 202 if 'job' in result else 200)
             elif path == '/api/export':
                 if not 0 < length <= 30000:
                     raise ValueError('The edit request is too large or empty.')
