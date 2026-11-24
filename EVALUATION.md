@@ -1,13 +1,24 @@
 # Development checks
 
-These engineering checks on 17 November 2026 covered playback, decision state and MP4 output.
+These engineering checks were performed with Codex assistance on 24 November 2026. The creator supplied the recordings, set a brief and inspected the four-source result. These checks are separate from a participant study.
 
 ## Automated checks
 
-Checks covered a real upload and export, request validation, source preservation and retained-frame comparisons. Direct HTTP checks covered browser byte-range seeking, missing confirmation, invalid token, invalid source identifier and stale source hash.
+The Python suite has 12 checks. It covers HTTP range playback, upload and original preservation, rejecting unconfirmed or invalid exports, mixed source sequence rendering, exact retained ranges, and rejecting a proposed cut that would discard a new instruction. The JavaScript suite covers cut and review decisions. A separate state check verified that removing one source keeps unrelated edits and reopens a comparison that lost its source.
 
-## Changes and unresolved limits
+## Observed workflows
 
-The browser check found a CSS issue with the hidden file input. Confirmation messages were tailored to the operation.
+| Case | Observed behavior |
+| --- | --- |
+| Batch import in Safari | All five selected files loaded. They included the 4K 120 fps source and its 1080p copy. The original's 540 × 960 H.264 preview was about 8 MB and played in Safari. The source is about 490 MB. |
+| Alternate copy | Picture and audio fingerprints paired the original and the H.264 conversion. The proposal kept the original in the timeline and made the copy available to include. |
+| Three real sources, deliberately scrambled | Input order 5725, 5724, 5723. AI order 5723, 5725, 5724. The planner linked the later 13–16 seconds of 5723 to the spoken setup at 0–5 seconds. Combined preview and 1080 × 1920 export both measured 31.32 seconds. |
+| Four sources with a brief in Safari | The order was 5721, 5725, 5724, 5723. The brief asked for device introductions and readiness to leave, keeping all devices and the reason for leaving. The observed one-second proposal compared “Yeah” in 5724 (3–4 s) and 5721 (31–32 s). The proposal was still pending in the observed interface. Draft duration was 71.0 s. |
+| Repeated speech fixture | A temporary, derived local test clip repeated an utterance and included different water and jacket actions. The planner linked 10–14 s to 0–5 s and left the distinct later material untouched. |
+| 4K output | A two-second cut rendered from the 4K original as 2160 × 3840 H.264 at 30 fps, with audio. This checked resolution and source use on one supported file. |
 
-Working-edit playback skips confirmed ranges by browser seeking and is approximate at boundaries. Export trims video and audio against the source times, re-encodes them, and checks duration/audio before offering the file. These checks cannot prove that a creator agrees with the edit. A controlled evaluation with creators, predeclared important content and matched proposed omissions remains future work.
+Private recordings and raw inference outputs remain local. The public-facing figures use schematic clip labels.
+
+## Limits
+
+The four-source proposal demonstrates a model weakness. The same short word in different scenes may play a different role. View the comparison in context before confirming. No accepted result is recorded for that suggestion. The system may also produce no proposed cuts. Groups of sampled frames can miss a brief action, and speech timestamps may need boundary adjustment. The original can be reviewed and intervals can be restored without repeating analysis. The current export normalizes format and does not preserve the original 120 fps or HDR. These tests do not establish benefits across creators, editing tasks or device configurations.
