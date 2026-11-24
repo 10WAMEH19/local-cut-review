@@ -306,7 +306,7 @@ function render() {
   $('draft-mode').textContent = draft?.revision === project.revision ? 'Rough cut' : 'Build rough-cut preview';
   $('source-mode').disabled = !selected;
   $('export').disabled = busy || !list.length;
-  $('import').disabled = $('new-project').disabled = busy;
+  $('import').disabled = $('new-project').disabled = $('load-example').disabled = busy;
   $('save-decisions').disabled = !project.sources.length;
   modeUi();
 }
@@ -418,6 +418,19 @@ function switchProject(title, label, action) {
 }
 
 $('new-project').onclick = () => switchProject('Start a new project?', 'New project', () => { reset(); notice('Import the videos for your new project.'); });
+$('load-example').onclick = () => switchProject('Open the filmed example?', 'Open filmed example', async () => {
+  try {
+    const example = await api('/api/example');
+    reset(false);
+    project.sources = example.sources;
+    project.order = example.sources.map(source => source.id);
+    project.goal = $('goal').value = example.goal;
+    project.preserve = $('retain').value = example.preserve;
+    playSource(project.order[0]);
+    project.sources.forEach(prepare);
+    notice('Filmed example opened. Select Build AI rough cut to analyze your footage and brief.');
+  } catch (error) { notice(error.message, true); }
+});
 $('import').onclick = () => $('file').click();
 $('file').onchange = event => {
   const files = [...event.target.files];
@@ -482,6 +495,7 @@ async function init() {
   try {
     const setup = await api('/api/bootstrap');
     token = setup.token; maxUpload = setup.max_upload; aiReady = setup.ai_ready;
+    $('load-example').hidden = !setup.example_available;
     let cached;
     try { cached = JSON.parse(localStorage.getItem(KEY)); } catch {}
     if (!cached) {

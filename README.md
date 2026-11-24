@@ -1,12 +1,13 @@
 # Local Cut Review
 
-README prose word count: 652 (excluding this count line and fenced commands).
+README prose word count: 766 (excluding this count line and fenced commands).
 
 I built this project to explore how creators can check what an editing assistant rearranges or removes. The editor takes several videos, proposes an order and short cuts, and lets the creator inspect and change the result before exporting.
 
 ## Status and stack
 
 - **Implemented** Batch import, lightweight source previews, local picture and speech analysis, AI sequencing and timed cut suggestions, continuous draft playback, editing controls and MP4 export from the originals.
+- **Filmed example** My four original phone recordings show a device overview and preparation to go out. The local example opens the videos and brief so the editor can generate fresh suggestions.
 - **Planned** More reliable fine-grained action and speech boundaries, broader codec testing and evaluation with creators.
 
 Browser JavaScript manages the timeline and decisions. A local Python server coordinates FFmpeg, Whisper Base speech transcription and the Qwen3-VL 2B and 4B instruction models through Ollama. The 2B model describes groups of frames. The 4B model proposes the order and checks for redundant or unrelated intervals. Source files and model inference stay on the computer.
@@ -31,6 +32,15 @@ Open the address printed in the terminal, usually [http://127.0.0.1:8766](http:/
 3. Review the order and cut cards. Use **Watch with context** or **Watch comparison**, then keep, adjust or confirm a candidate. Use **Restore** on a confirmed cut. Confirm the rough cut before exporting outstanding AI edits.
 4. Export at 720p, 1080p or 4K. The current output normalizes to 30 fps SDR. The browser's lighter preview does not determine export resolution.
 
+## Filmed example
+
+On my Mac, **Open filmed example** loads `IMG_5721.MOV`, `IMG_5723.MOV`, `IMG_5724.MOV` and `IMG_5725.MOV` and fills in my brief.
+
+- **Creative goal** “a video about introducing my devices and ready to head out”
+- **Content to preserve** “keep all devices and the reason why I want to go out”
+
+Select **Build AI rough cut** to analyze the footage. On another computer, import your own videos and use the same controls. My recordings and the local example settings stay in the ignored `data/` folder or in my local copy of the project.
+
 ## Development record
 
 - `f3ba210` and `f60c59e` turned Lab 4 decision records into a working single-source editor. They introduced local playback, review, reversible cuts and an MP4 path checked against source frames and audio.
@@ -49,4 +59,4 @@ node --test tests/review.test.mjs
 
 ## AI assistance
 
-I set the project direction, recorded the evaluation clips, specified what the draft should preserve and tried the four-clip workflow. OpenAI Codex assisted implementation, model setup, test execution, diagram preparation and report drafting. I reviewed the revised workflow and the AI suggestions before approving this version. The engineering checks establish the tested behavior and leave general editing quality for future evaluation.
+I set the project direction, recorded the evaluation clips, specified what the draft should preserve and tried the four-clip workflow. OpenAI Codex assisted with implementation, model setup, testing and preparing diagrams. I reviewed the revised workflow and the AI suggestions before approving this version. The overall editing quality still needs improvement.

@@ -42,6 +42,17 @@ def source_record(identifier):
                     'preview_url': '/previews/' + identifier + '.mp4'}
 
 
+def filmed_example():
+    config = json.loads((DATA / 'example-project.json').read_text())
+    ids = config.get('source_ids')
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 20
+            or any(not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier)
+                   for identifier in ids) or len(set(ids)) != len(ids)):
+        raise ValueError('The local example has invalid source references.')
+    return {'sources': [source_record(identifier)[1] for identifier in ids],
+            'goal': str(config.get('goal', ''))[:1200], 'preserve': str(config.get('preserve', ''))[:1200]}
+
+
 def prepare_source(identifier):
     source, info = source_record(identifier)
     if info['preview_ready']:
@@ -172,7 +183,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/bootstrap':
                 import local_analysis
                 self.send_json({'token': TOKEN, 'export_available': bool(media.ffmpeg_path()),
-                                'max_upload': MAX_UPLOAD, 'ai_ready': local_analysis.configured()})
+                                'max_upload': MAX_UPLOAD, 'ai_ready': local_analysis.configured(),
+                                'example_available': (DATA / 'example-project.json').is_file()})
+            elif path == '/api/example':
+                try:
+                    self.send_json(filmed_example())
+                except (AttributeError, ValueError, OSError):
+                    self.send_json({'error': 'The filmed example is not available on this Mac. Import your own videos to start.'}, 404)
             elif path.startswith('/api/source/'):
                 self.send_json(source_record(path.rsplit('/', 1)[1])[1])
             elif path.startswith('/api/jobs/'):
